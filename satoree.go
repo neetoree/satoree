@@ -121,8 +121,8 @@ func registerServices(etcd *etcd.Client, container *docker.Container) {
 	for _, network := range container.NetworkSettings.Networks {
 		for port, portbinds := range container.NetworkSettings.Ports {
 			idx++;
-			localPath := makePath(localPrefix, container.Name, idx)
-			globalPath := makePath(globalPrefix, container.Name, idx)
+			localPath := makePath(localPrefix, container.Name, port, idx)
+			globalPath := makePath(globalPrefix, container.Name, port, idx)
 
 			if len(portbinds) == 0 {
 				_, err := etcd.Set(localPath, makeRecord(network.IPAddress, port.Port(), 15), uint64(*etcdTtl))
@@ -167,8 +167,8 @@ func heartbeat(etcd *etcd.Client, host string, port docker.Port, path string, na
 }
 
 
-func makePath(prefix string, name string, idx int) string {
-	return prefix + "/" + name + "/" + strconv.Itoa(idx);
+func makePath(prefix string, name string, port docker.Port, idx int) string {
+	return prefix + "/" + name + "/" + port.Port() + "/" + port.Proto() + "/" + strconv.Itoa(idx);
 }
 
 func makeRecord(ip string, port string, priority int) string {
@@ -181,6 +181,7 @@ func unrgisterServices(etcd *etcd.Client, container *docker.Container) {
 	close(waiters[container.ID])
 	delete(waiters, container.ID)
 }
+
 func removeEndpoints(etcd *etcd.Client, name string) {
 	etcd.Delete(localPrefix + "/" + name, true)
 	etcd.Delete(globalPrefix + "/" + name, true)
