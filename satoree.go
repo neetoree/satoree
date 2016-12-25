@@ -11,6 +11,7 @@ import (
 	"strings"
 	"net"
 	"time"
+	"encoding/json"
 )
 
 var etcdUrl = flag.String("etcd", "http://127.0.0.1:2379", "etcd endpoint")
@@ -30,7 +31,7 @@ func unpanic(first interface{}, err error) interface{} {
 	return first
 }
 
-func main()  {
+func main() {
 	flag.Usage = func() {
 		fmt.Printf("Usage of %s:\n", os.Args[0])
 		fmt.Printf("  %s [options]\n\n", os.Args[0])
@@ -113,9 +114,7 @@ func preparePrefix(unprepared string) string {
 }
 
 func registerServices(etcd *etcd.Client, container *docker.Container) {
-	log.Println("start", container.ID)
 	idx := 0;
-
 	waiters[container.ID] = make(chan bool)
 
 	for _, network := range container.NetworkSettings.Networks {
@@ -125,33 +124,39 @@ func registerServices(etcd *etcd.Client, container *docker.Container) {
 			globalPath := makePath(globalPrefix, container.Name, port, idx)
 
 			if len(portbinds) == 0 {
-				_, err := etcd.Set(localPath, makeRecord(network.IPAddress, port.Port(), 15), uint64(*etcdTtl))
-				if err != nil {
-					panic(err)
-				}
-				go heartbeat(etcd, network.IPAddress, port, localPath, container.Name, waiters[container.ID])
+				etcd.CreateDir(localPrefix + "/" + container.Name, 0)
+				record := makeRecord(container, network.IPAddress, port, 15)
+				go heartbeat(etcd, network.IPAddress, port, localPath, container.Name, waiters[container.ID], record)
 			} else {
-				_, err := etcd.Set(globalPath, makeRecord(*externalIp, port.Port(), 30), uint64(*etcdTtl))
-				if err != nil {
-					panic(err)
-				}
-				go heartbeat(etcd, *externalIp, port, globalPath, container.Name, waiters[container.ID])
+				etcd.CreateDir(globalPrefix + "/" + container.Name, 0)
+				record := makeRecord(container, *externalIp, port, 30)
+				go heartbeat(etcd, *externalIp, port, globalPath, container.Name, waiters[container.ID], record)
 			}
 		}
 	}
 }
-func heartbeat(etcd *etcd.Client, host string, port docker.Port, path string, name string, ch chan bool) {
+func heartbeat(etcd *etcd.Client, host string, port docker.Port, path string, name string, ch chan bool, record string) {
+	for i := 0; i < *etcdCheck * 2000; i+=250 {
+		conn, err := net.Dial(port.Proto(), host + ":" + string(port.Port()))
+		if err != nil {
+			time.Sleep(time.Millisecond * time.Duration(250))
+		} else {
+			conn.Close()
+		}
+	}
+
 	for {
 		conn, err := net.Dial(port.Proto(), host + ":" + string(port.Port()))
 		if err != nil {
 			etcd.Delete(path, true)
 		} else {
 			conn.Close()
-			resp, err := etcd.Get(path, false, false);
-			if (err != nil) {
-				panic(err)
+			_, err := etcd.Get(path, false, false)
+			if err != nil {
+				etcd.Set(path, record, uint64(*etcdTtl))
+			} else {
+				etcd.Update(path, record, uint64(*etcdTtl))
 			}
-			etcd.Update(path, resp.Node.Value, uint64(*etcdTtl))
 		}
 		time.Sleep(time.Second * time.Duration(*etcdCheck))
 		select {
@@ -171,12 +176,16 @@ func makePath(prefix string, name string, port docker.Port, idx int) string {
 	return prefix + "/" + name + "/" + port.Port() + "/" + port.Proto() + "/" + strconv.Itoa(idx);
 }
 
-func makeRecord(ip string, port string, priority int) string {
-	return `{"host":"` + ip + `","port":` + port + `,"priority":` + strconv.Itoa(priority) + `}`
+func makeRecord(container *docker.Container, ip string, port docker.Port, priority int) string {
+	rawlabels, err := json.Marshal(container.Config.Labels)
+	if err != nil {
+		panic(err)
+	}
+	labels := string(rawlabels)
+	return `{"host":"` + ip + `","port":` + port.Port() + `,"proto":"` + port.Proto() + `","priority":` + strconv.Itoa(priority) + `,"labels":` + labels +`}`
 }
 
 func unrgisterServices(etcd *etcd.Client, container *docker.Container) {
-	log.Println("stop", container.ID)
 	removeEndpoints(etcd, container.Name)
 	close(waiters[container.ID])
 	delete(waiters, container.ID)
